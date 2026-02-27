@@ -6,6 +6,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Plus, ShoppingBasket, User, Phone, MapPin, Calendar, CheckCircle, Trash2, ChevronRight, Package, Hash, CreditCard, Heart, Leaf, Settings, Save, X, PlusCircle, Edit3, ShoppingCart, ListChecks, PlusSquare, Edit, RotateCcw, Truck, Clock, Info, BookOpen, BarChart3, Pill, CalendarDays, Users } from 'lucide-react';
 
+// ดึง URL จาก Environment Variable (ต้องตั้งชื่อ VITE_API_URL ใน Vercel)
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+
 const App = () => {
   // นำเข้าฟอนต์ Sarabun ผ่าน Google Fonts
   useEffect(() => {
@@ -56,7 +59,7 @@ const App = () => {
   const [customerName, setCustomerName] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
-  const [deliveryDate, setDeliveryDate] = useState(''); // New state for delivery date
+  const [deliveryDate, setDeliveryDate] = useState('');
   const [cart, setCart] = useState<any[]>([]);
   
   const [selectedSetId, setSelectedSetId] = useState<number | null>(null);
@@ -95,28 +98,30 @@ const App = () => {
 
   useEffect(() => {
     const init = async () => {
-      // Start fetching everything in parallel
-      const statusPromise = checkGoogleStatus();
-      const configsPromise = fetchConfigs();
-      const ordersPromise = fetch('/api/orders').then(res => res.ok ? res.json() : null).catch(e => {
-        console.error("Failed to fetch orders", e);
-        return null;
-      });
-
-      // Wait for all requests to complete
-      await statusPromise;
-      const configsData = await configsPromise;
-      const ordersData = await ordersPromise;
-
-      // Process orders with the fetched configs
-      await fetchOrders(configsData, ordersData);
+      await checkGoogleStatus();
+      const configsData = await fetchConfigs();
+      
+      // Fetch orders using the full URL from Environment
+      try {
+        const res = await fetch(`${API_BASE_URL}?action=getOrders`);
+        if (res.ok) {
+          const data = await res.json();
+          await fetchOrders(configsData, data);
+        } else {
+          await fetchOrders(configsData, null);
+        }
+      } catch (e) {
+        console.error("Failed to fetch initial orders", e);
+        await fetchOrders(configsData, null);
+      }
     };
     init();
-  }, []);
+  }, [isGoogleConnected]);
 
   const fetchConfigs = async () => {
+    if (!API_BASE_URL) return null;
     try {
-      const res = await fetch('/api/configs');
+      const res = await fetch(`${API_BASE_URL}?action=getConfigs`);
       if (res.ok) {
         const data = await res.json();
         if (data.status === 'success' && data.data) {
@@ -126,7 +131,7 @@ const App = () => {
           if (data.data.dessertData && Array.isArray(data.data.dessertData)) {
             setDessertData(data.data.dessertData);
           }
-          return data.data; // Return data for sequential calls
+          return data.data;
         }
       }
     } catch (e) {
@@ -136,16 +141,14 @@ const App = () => {
   };
 
   const saveConfigsToSheet = async () => {
-    if (!isGoogleConnected) return;
+    if (!isGoogleConnected || !API_BASE_URL) return;
     try {
-      const res = await fetch('/api/save-configs', {
+      await fetch(API_BASE_URL, {
         method: 'POST',
+        mode: 'no-cors',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configs: { setConfigs, dessertData } })
+        body: JSON.stringify({ action: 'saveConfigs', configs: { setConfigs, dessertData } })
       });
-      if (!res.ok) {
-        console.error("Failed to save configs to sheet");
-      }
     } catch (e) {
       console.error("Error saving configs", e);
     }
@@ -154,12 +157,10 @@ const App = () => {
   const fetchOrders = async (currentConfigs?: any, preFetchedOrdersData?: any) => {
     try {
       setIsLoading(true);
-      
       let data = preFetchedOrdersData;
       
-      // If no pre-fetched data, fetch it now
-      if (!data) {
-        const res = await fetch('/api/orders');
+      if (!data && API_BASE_URL) {
+        const res = await fetch(`${API_BASE_URL}?action=getOrders`);
         if (res.ok) {
           data = await res.json();
         }
@@ -170,7 +171,6 @@ const App = () => {
 
           const sheetOrders = data.data.map((row: any, index: number) => {
             const itemsSummary = String(row[5] || '');
-            
             const parsedItems = itemsSummary.split(' | ').map(part => {
               const match = part.match(/(.+) \((.+)\) x (\d+)/);
               if (match) {
@@ -218,12 +218,10 @@ const App = () => {
   };
 
   const checkGoogleStatus = async () => {
-    try {
-      const res = await fetch('/api/auth/status');
-      const data = await res.json();
-      setIsGoogleConnected(data.connected);
-    } catch (e) {
-      console.error("Failed to check auth status", e);
+    if (API_BASE_URL && API_BASE_URL.startsWith('http')) {
+      setIsGoogleConnected(true);
+    } else {
+      setIsGoogleConnected(false);
     }
   };
 
@@ -246,10 +244,8 @@ const App = () => {
     };
   }, [orders]);
 
-  // คำนวณยอดผลิตรวมเป็น Map เพื่อการค้นหาที่รวดเร็ว
   const productionMap = useMemo(() => {
     const pendingOrders = orders.filter(order => order.status === 'pending');
-
     const counts: Record<string, number> = {};
     pendingOrders.forEach(order => {
       if (order.orderItems && order.orderItems.length > 0) {
@@ -259,7 +255,6 @@ const App = () => {
           });
         });
       } else if (order.itemsSummary) {
-        // Parse itemsSummary: "setName (item1, item2) x 2 | ..."
         const parts = order.itemsSummary.split(' | ');
         parts.forEach(part => {
           const match = part.match(/.*\(([^)]+)\)\s*x\s*(\d+)/);
@@ -280,7 +275,6 @@ const App = () => {
 
   const dessertList = useMemo(() => dessertData.map(d => d.name), [dessertData]);
 
-  // ฟังก์ชันจัดการเมนูขนม (เพิ่ม/ลบ/แก้ไข)
   const addNewDessert = () => {
     const newId = dessertData.length > 0 ? Math.max(...dessertData.map(d => d.id)) + 1 : 1;
     setDessertData([...dessertData, { id: newId, name: `ขนมใหม่ ${newId}`, ingredients: [] }]);
@@ -332,22 +326,17 @@ const App = () => {
     setPhone(order.phone);
     setAddress(order.address);
     
-    // Format delivery date for input (YYYY-MM-DD)
     let formattedDate = '';
     if (order.deliveryDate) {
-      // Check if already in YYYY-MM-DD
       if (/^\d{4}-\d{2}-\d{2}$/.test(order.deliveryDate)) {
         formattedDate = order.deliveryDate;
       } else {
-        // Try parsing standard date string
         const date = new Date(order.deliveryDate);
         if (!isNaN(date.getTime())) {
           formattedDate = date.toISOString().split('T')[0];
         } else {
-            // Handle potential DD/MM/YYYY format manually if Date parsing fails
             const parts = order.deliveryDate.split('/');
             if (parts.length === 3) {
-                // Assuming DD/MM/YYYY
                 formattedDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
             }
         }
@@ -356,8 +345,6 @@ const App = () => {
     setDeliveryDate(formattedDate);
     
     let itemsToEdit = [...(order.orderItems || [])];
-    
-    // ถ้า orderItems ว่าง (กรณีดึงมาจาก Google Sheets) ให้พยายามแกะจาก itemsSummary
     if (itemsToEdit.length === 0 && order.itemsSummary) {
       const parts = order.itemsSummary.split(' | ');
       itemsToEdit = parts.map((part: string) => {
@@ -385,7 +372,6 @@ const App = () => {
     setIsAdding(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
-    // เริ่มต้นการแก้ไขรายการแรกในตะกร้าโดยอัตโนมัติ
     if (itemsToEdit.length > 0) {
       startEditCartItem(itemsToEdit[0]);
     }
@@ -393,11 +379,10 @@ const App = () => {
 
   const toggleOrderStatus = async (orderId: number) => {
     const orderToUpdate = orders.find(o => o.id === orderId);
-    if (!orderToUpdate) return;
+    if (!orderToUpdate || !API_BASE_URL) return;
 
     const newStatus = orderToUpdate.status === 'pending' ? 'delivered' : 'pending';
 
-    // อัปเดตสถานะใน UI ทันทีเพื่อการตอบสนองที่รวดเร็ว
     setOrders(orders.map(o => {
       if (o.id === orderId) {
         return { ...o, status: newStatus };
@@ -405,33 +390,15 @@ const App = () => {
       return o;
     }));
 
-    // ส่งการเปลี่ยนแปลงสถานะไปยัง Backend เพื่ออัปเดต Google Sheet
     try {
-      const res = await fetch('/api/update-order-status', {
+      await fetch(API_BASE_URL, {
         method: 'POST',
+        mode: 'no-cors',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId: orderToUpdate.id, isFromSheet: orderToUpdate.isFromSheet, timestamp: orderToUpdate.timestamp, newStatus })
+        body: JSON.stringify({ action: 'updateStatus', orderId: orderToUpdate.id, isFromSheet: orderToUpdate.isFromSheet, timestamp: orderToUpdate.timestamp, newStatus })
       });
-
-      if (!res.ok) {
-        console.error('Failed to update order status in Google Sheet');
-        // หากอัปเดตไม่สำเร็จ อาจจะย้อนสถานะใน UI กลับ หรือแจ้งเตือนผู้ใช้
-        setOrders(orders.map(o => {
-          if (o.id === orderId) {
-            return { ...o, status: orderToUpdate.status }; // ย้อนสถานะกลับ
-          }
-          return o;
-        }));
-      }
     } catch (e) {
       console.error('Error updating order status:', e);
-      // หากเกิดข้อผิดพลาด อาจจะย้อนสถานะใน UI กลับ หรือแจ้งเตือนผู้ใช้
-      setOrders(orders.map(o => {
-        if (o.id === orderId) {
-          return { ...o, status: orderToUpdate.status }; // ย้อนสถานะกลับ
-        }
-        return o;
-      }));
     }
   };
 
@@ -491,30 +458,28 @@ const App = () => {
     if (cart.length === 0 || !customerName || !phone) return;
 
     if (editingOrderId) {
-      setOrders(orders.map(o => o.id === editingOrderId ? {
-        ...o,
+      const updatedOrder = {
         customerName,
         phone,
         address,
-        deliveryDate, // Include delivery date
+        deliveryDate,
         orderItems: [...cart],
         grandTotal: cartTotal,
-      } : o));
+      };
+      setOrders(orders.map(o => o.id === editingOrderId ? { ...o, ...updatedOrder } : o));
     } else {
       const newOrder = {
         id: Date.now(),
         customerName,
         phone,
         address,
-        deliveryDate, // Include delivery date
+        deliveryDate,
         orderItems: [...cart],
         grandTotal: cartTotal,
         status: 'pending',
         timestamp: new Date().toISOString(),
       };
       setOrders([newOrder, ...orders]);
-      
-      // Save to Google Sheets if connected
       if (isGoogleConnected) {
         saveToGoogleSheets(newOrder);
       }
@@ -525,19 +490,16 @@ const App = () => {
   };
 
   const saveToGoogleSheets = async (order: any) => {
+    if (!API_BASE_URL) return;
     try {
-      const res = await fetch('/api/save-to-sheet', {
+      await fetch(API_BASE_URL, {
         method: 'POST',
+        mode: 'no-cors',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order })
+        body: JSON.stringify({ action: 'saveOrder', order })
       });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Failed to save to sheet");
-      }
     } catch (e: any) {
       console.error("Google Sheets Error:", e);
-      alert(`ไม่สามารถบันทึกลง Google Sheets ได้: ${e.message}`);
     }
   };
 
@@ -545,7 +507,7 @@ const App = () => {
     setCustomerName('');
     setPhone('');
     setAddress('');
-    setDeliveryDate(''); // Reset delivery date
+    setDeliveryDate('');
     setCart([]);
     setSelectedSetId(null);
     setSelectedItems([]);
@@ -586,7 +548,7 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-[#F0F4F0] p-3 md:p-8 text-slate-900 pb-20" style={mainFontStyle}>
-      {!isGoogleConnected && !isLoading && (
+      {!isGoogleConnected && (
         <div className="max-w-4xl mx-auto mb-6 bg-red-50 border-l-4 border-red-500 p-4 rounded-r-xl shadow-sm animate-in fade-in slide-in-from-top-2">
           <div className="flex items-start">
             <div className="flex-shrink-0">
@@ -594,14 +556,13 @@ const App = () => {
             </div>
             <div className="ml-3">
               <h3 className="text-sm font-bold text-red-800">
-                ไม่สามารถเชื่อมต่อกับ Google Sheets ได้
+                ยังไม่ได้ระบุ VITE_API_URL ใน Vercel Settings
               </h3>
               <div className="mt-1 text-xs text-red-700">
-                <p>กรุณาตรวจสอบการตั้งค่า Environment Variable ในระบบ Deploy ของคุณ:</p>
-                <ul className="list-disc list-inside mt-1 space-y-1">
-                  <li>ต้องมีตัวแปรชื่อ <code>GOOGLE_APPS_SCRIPT_URL</code></li>
-                  <li>ค่าของตัวแปรต้องเป็น URL ของ Web App ที่ได้จากการ Deploy Google Apps Script (ลงท้ายด้วย <code>/exec</code>)</li>
-                  <li>สิทธิ์การเข้าถึงของ Script ต้องตั้งเป็น "Anyone" (ทุกคน)</li>
+                <p>กรุณาตั้งค่า Environment Variable บน Vercel:</p>
+                <ul className="list-disc list-inside mt-1">
+                  <li>Key: <code>VITE_API_URL</code></li>
+                  <li>Value: URL ของ Google Apps Script ของคุณ</li>
                 </ul>
               </div>
             </div>
@@ -652,8 +613,8 @@ const App = () => {
           <div className="flex items-center gap-2 md:gap-4">
             <div className="flex flex-col justify-center px-1 md:px-2">
               <div 
-                title={isGoogleConnected ? 'Google Sheets (Apps Script) เชื่อมต่อแล้ว' : 'ยังไม่ได้ตั้งค่า Apps Script URL'}
-                className={`w-3 h-3 md:w-4 md:h-4 rounded-full ${isGoogleConnected ? 'bg-emerald-500 animate-pulse shadow-[0_0_10px_rgba(16,185,129,0.6)]' : 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.6)]'}`}
+                title={isGoogleConnected ? 'เชื่อมต่อแล้ว' : 'ไม่ได้เชื่อมต่อ'}
+                className={`w-3 h-3 md:w-4 md:h-4 rounded-full ${isGoogleConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}
               />
             </div>
             
@@ -675,7 +636,7 @@ const App = () => {
           </div>
         </header>
 
-        {/* Section: Recipe Guide (Full Width) */}
+        {/* Recipe Guide Section */}
         {!isEditingConfigs && (
           <div className="mb-8">
             <div className="flex items-center gap-2 mb-3">
@@ -694,12 +655,10 @@ const App = () => {
                     className={`relative bg-white hover:bg-emerald-50 text-emerald-700 border-2 px-3 md:px-4 py-1.5 md:py-2 rounded-full text-[10px] md:text-xs font-bold shadow-sm transition-all flex items-center gap-1.5 md:gap-2 active:scale-95 ${currentCount > 0 ? 'border-amber-400 ring-2 ring-amber-400/20' : 'border-emerald-100'}`}
                    >
                      {dessert.name}
-                     {currentCount > 0 ? (
+                     {currentCount > 0 && (
                         <span className="bg-red-500 text-white text-[9px] md:text-[10px] font-black min-w-[18px] md:min-w-[20px] h-4 md:h-5 flex items-center justify-center rounded-full shadow-md animate-pulse px-1">
                           {currentCount}
                         </span>
-                     ) : (
-                        <Info className="w-3 h-3 text-emerald-300" />
                      )}
                    </button>
                  );
@@ -708,17 +667,17 @@ const App = () => {
           </div>
         )}
 
-        {/* Modal ตั้งค่าราคา ชื่อเซต และเมนูขนม */}
+        {/* Config Modal */}
         {isEditingConfigs && (
           <div className="fixed inset-0 bg-emerald-950/60 backdrop-blur-md z-[60] flex items-center justify-center p-4 animate-in fade-in duration-300">
-            <div className="bg-[#F8FAF8] rounded-[2.5rem] w-full max-w-2xl max-h-[90vh] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300 border-8 border-white flex flex-col">
+            <div className="bg-[#F8FAF8] rounded-[2.5rem] w-full max-w-2xl max-h-[90vh] shadow-2xl overflow-hidden flex flex-col">
               <div className="bg-emerald-800 p-5 text-white relative shrink-0">
                 <button 
                   onClick={() => {
                     saveConfigsToSheet();
                     setIsEditingConfigs(false);
                   }} 
-                  className="absolute top-4 right-4 bg-white/20 p-2 rounded-full hover:bg-white/30 transition-colors"
+                  className="absolute top-4 right-4 bg-white/20 p-2 rounded-full hover:bg-white/30"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -735,32 +694,32 @@ const App = () => {
               
               <div className="p-4 md:p-6 overflow-y-auto custom-scrollbar">
                 <div className="space-y-8">
-                  {/* จัดการรูปแบบเซต */}
+                  {/* Sets Config */}
                   <div className="space-y-4">
                     <div className="flex justify-between items-center border-b-2 border-emerald-100 pb-2">
                       <h4 className="text-xs font-black text-emerald-900 uppercase tracking-widest flex items-center gap-2">
                         <Package className="w-3.5 h-3.5" /> A. รูปแบบเซตขนม
                       </h4>
-                      <button type="button" onClick={addNewSet} className="flex items-center gap-1 bg-emerald-700 text-white text-[10px] px-3 py-1.5 rounded-lg font-bold shadow-md hover:bg-emerald-800 transition-all active:scale-95">
-                        <PlusCircle className="w-3.5 h-3.5" /> เพิ่มเซต
+                      <button type="button" onClick={addNewSet} className="bg-emerald-700 text-white text-[10px] px-3 py-1.5 rounded-lg font-bold">
+                        เพิ่มเซต
                       </button>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {setConfigs.map((set) => (
-                        <div key={set.id} className="bg-white p-4 rounded-2xl border-2 border-emerald-50 shadow-sm space-y-3 relative group hover:border-emerald-200 transition-all">
-                          <button type="button" onClick={() => removeSet(set.id)} className="absolute -top-2 -right-2 bg-red-500 text-white p-1.5 rounded-full shadow-lg opacity-0 group-hover:opacity-100 transition-all hover:scale-110"><X className="w-3 h-3" /></button>
+                        <div key={set.id} className="bg-white p-4 rounded-2xl border-2 border-emerald-50 shadow-sm relative group">
+                          <button type="button" onClick={() => removeSet(set.id)} className="absolute -top-2 -right-2 bg-red-500 text-white p-1.5 rounded-full shadow-lg opacity-0 group-hover:opacity-100 transition-all"><X className="w-3 h-3" /></button>
                           <div className="space-y-1">
-                            <label className="text-[9px] font-black text-slate-400 uppercase tracking-wider">ชื่อเซต</label>
-                            <input className="w-full text-xs font-extrabold p-2 bg-slate-50 border-2 border-transparent focus:border-emerald-500 rounded-lg outline-none transition-all" value={set.name} onChange={(e) => updateSetConfig(set.id, 'name', e.target.value)} />
+                            <label className="text-[9px] font-black text-slate-400 uppercase">ชื่อเซต</label>
+                            <input className="w-full text-xs font-extrabold p-2 bg-slate-50 rounded-lg outline-none" value={set.name} onChange={(e) => updateSetConfig(set.id, 'name', e.target.value)} />
                           </div>
-                          <div className="grid grid-cols-2 gap-2">
+                          <div className="grid grid-cols-2 gap-2 mt-2">
                             <div className="space-y-1">
-                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-wider">ราคา (฿)</label>
-                              <input type="number" className="w-full text-xs font-extrabold p-2 bg-slate-50 border-2 border-transparent focus:border-emerald-500 rounded-lg outline-none transition-all" value={set.price} onChange={(e) => updateSetConfig(set.id, 'price', parseInt(e.target.value) || 0)} />
+                              <label className="text-[9px] font-black text-slate-400 uppercase">ราคา</label>
+                              <input type="number" className="w-full text-xs font-extrabold p-2 bg-slate-50 rounded-lg outline-none" value={set.price} onChange={(e) => updateSetConfig(set.id, 'price', parseInt(e.target.value) || 0)} />
                             </div>
                             <div className="space-y-1">
-                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-wider">จำนวน (ชิ้น)</label>
-                              <input type="number" className="w-full text-xs font-extrabold p-2 bg-slate-50 border-2 border-transparent focus:border-emerald-500 rounded-lg outline-none transition-all" value={set.limit} onChange={(e) => updateSetConfig(set.id, 'limit', parseInt(e.target.value) || 0)} />
+                              <label className="text-[9px] font-black text-slate-400 uppercase">จำนวนชิ้น</label>
+                              <input type="number" className="w-full text-xs font-extrabold p-2 bg-slate-50 rounded-lg outline-none" value={set.limit} onChange={(e) => updateSetConfig(set.id, 'limit', parseInt(e.target.value) || 0)} />
                             </div>
                           </div>
                         </div>
@@ -768,54 +727,49 @@ const App = () => {
                     </div>
                   </div>
 
-                  {/* จัดการรายชื่อขนมและสูตร */}
+                  {/* Dessert Recipes Config */}
                   <div className="space-y-4">
                     <div className="flex justify-between items-center border-b-2 border-emerald-100 pb-2">
                       <h4 className="text-xs font-black text-emerald-900 uppercase tracking-widest flex items-center gap-2">
                         <BookOpen className="w-3.5 h-3.5" /> B. รายชื่อขนมและส่วนผสม
                       </h4>
-                      <button type="button" onClick={addNewDessert} className="flex items-center gap-1 bg-amber-500 text-white text-[10px] px-3 py-1.5 rounded-lg font-bold shadow-md hover:bg-amber-600 transition-all active:scale-95">
-                        <PlusSquare className="w-3.5 h-3.5" /> เพิ่มขนมใหม่
+                      <button type="button" onClick={addNewDessert} className="bg-amber-500 text-white text-[10px] px-3 py-1.5 rounded-lg font-bold">
+                        เพิ่มขนมใหม่
                       </button>
                     </div>
                     <div className="grid grid-cols-1 gap-4">
                       {dessertData.map((dessert) => (
-                        <div key={dessert.id} className="bg-white p-4 rounded-[1.5rem] border-2 border-emerald-50 shadow-sm space-y-4 hover:border-emerald-200 transition-all">
+                        <div key={dessert.id} className="bg-white p-4 rounded-[1.5rem] border-2 border-emerald-50 shadow-sm space-y-4">
                           <div className="flex items-center justify-between gap-3">
-                            <div className="flex-1 space-y-1">
-                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-wider">ชื่อขนมไทย</label>
-                              <input 
-                                className="w-full text-lg font-black p-2 bg-slate-50 border-2 border-transparent focus:border-emerald-500 rounded-xl outline-none transition-all" 
-                                value={dessert.name} 
-                                onChange={(e) => updateDessertName(dessert.id, e.target.value)} 
-                              />
+                            <div className="flex-1">
+                              <label className="text-[9px] font-black text-slate-400 uppercase">ชื่อขนมไทย</label>
+                              <input className="w-full text-lg font-black p-2 bg-slate-50 rounded-xl outline-none" value={dessert.name} onChange={(e) => updateDessertName(dessert.id, e.target.value)} />
                             </div>
-                            <button type="button" onClick={() => removeDessert(dessert.id)} className="text-red-300 hover:text-red-500 p-2 mt-4 transition-colors"><Trash2 className="w-5 h-5"/></button>
+                            <button type="button" onClick={() => removeDessert(dessert.id)} className="text-red-300 hover:text-red-500 p-2"><Trash2 className="w-5 h-5"/></button>
                           </div>
 
                           <div className="bg-emerald-50/50 p-4 rounded-xl space-y-3 border border-emerald-100">
                             <div className="flex justify-between items-center">
-                              <span className="text-xs font-black text-emerald-800 uppercase tracking-widest">ส่วนผสมต่อขนม 1 ชิ้น</span>
-                              <button type="button" onClick={() => addIngredientToDessert(dessert.id)} className="text-[10px] font-black text-emerald-700 bg-white border-2 border-emerald-100 px-2.5 py-1.5 rounded-lg shadow-sm hover:bg-emerald-50 transition-all">+ เพิ่มวัตถุดิบ</button>
+                              <span className="text-xs font-black text-emerald-800 uppercase">ส่วนผสมต่อขนม 1 ชิ้น</span>
+                              <button type="button" onClick={() => addIngredientToDessert(dessert.id)} className="text-[10px] font-black text-emerald-700 bg-white border px-2.5 py-1.5 rounded-lg">+ เพิ่มวัตถุดิบ</button>
                             </div>
                             <div className="space-y-2">
                               {dessert.ingredients.map((ing: any, i: number) => (
                                 <div key={i} className="grid grid-cols-12 gap-2 items-center">
                                   <div className="col-span-5">
-                                    <input className="w-full text-xs font-bold p-2.5 bg-white border-2 border-transparent focus:border-emerald-500 rounded-lg outline-none shadow-sm" placeholder="ชื่อวัตถุดิบ" value={ing.name} onChange={(e) => updateIngredient(dessert.id, i, 'name', e.target.value)} />
+                                    <input className="w-full text-xs font-bold p-2 bg-white rounded-lg outline-none" placeholder="ชื่อวัตถุดิบ" value={ing.name} onChange={(e) => updateIngredient(dessert.id, i, 'name', e.target.value)} />
                                   </div>
                                   <div className="col-span-3">
-                                    <input type="number" step="0.1" className="w-full text-xs font-bold p-2.5 bg-white border-2 border-transparent focus:border-emerald-500 rounded-lg outline-none text-center shadow-sm" placeholder="ปริมาณ" value={ing.amount} onChange={(e) => updateIngredient(dessert.id, i, 'amount', parseFloat(e.target.value) || 0)} />
+                                    <input type="number" step="0.1" className="w-full text-xs font-bold p-2 bg-white rounded-lg outline-none text-center" value={ing.amount} onChange={(e) => updateIngredient(dessert.id, i, 'amount', parseFloat(e.target.value) || 0)} />
                                   </div>
                                   <div className="col-span-3">
-                                    <input className="w-full text-xs font-bold p-2.5 bg-white border-2 border-transparent focus:border-emerald-500 rounded-lg outline-none text-center shadow-sm" placeholder="หน่วย" value={ing.unit} onChange={(e) => updateIngredient(dessert.id, i, 'unit', e.target.value)} />
+                                    <input className="w-full text-xs font-bold p-2 bg-white rounded-lg outline-none text-center" placeholder="หน่วย" value={ing.unit} onChange={(e) => updateIngredient(dessert.id, i, 'unit', e.target.value)} />
                                   </div>
                                   <div className="col-span-1 text-right">
-                                    <button type="button" onClick={() => removeIngredient(dessert.id, i)} className="text-red-200 hover:text-red-500 transition-colors"><X className="w-4 h-4"/></button>
+                                    <button type="button" onClick={() => removeIngredient(dessert.id, i)} className="text-red-200 hover:text-red-500"><X className="w-4 h-4"/></button>
                                   </div>
                                 </div>
                               ))}
-                              {dessert.ingredients.length === 0 && <p className="text-xs text-slate-400 font-bold italic text-center py-1">ยังไม่มีข้อมูลส่วนผสม</p>}
                             </div>
                           </div>
                         </div>
@@ -825,13 +779,13 @@ const App = () => {
                 </div>
               </div>
 
-              <div className="p-5 bg-white border-t-2 border-emerald-50 shrink-0">
+              <div className="p-5 bg-white border-t shrink-0">
                 <button 
                   onClick={() => {
                     saveConfigsToSheet();
                     setIsEditingConfigs(false);
                   }}
-                  className="w-full py-3.5 bg-emerald-700 text-white rounded-2xl font-black text-lg shadow-xl shadow-emerald-700/20 hover:bg-emerald-800 transition-all active:scale-[0.98]"
+                  className="w-full py-3.5 bg-emerald-700 text-white rounded-2xl font-black text-lg"
                 >
                   บันทึกและปิดหน้าต่าง
                 </button>
@@ -840,191 +794,136 @@ const App = () => {
           </div>
         )}
 
-        {/* Modal แสดงสูตรส่วนผสมที่คำนวณตามยอดผลิต */}
+        {/* Recipe Summary Modal */}
         {showRecipeModal && (
-          <div className="fixed inset-0 bg-emerald-950/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
-            <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 border-4 border-emerald-600/10">
+          <div className="fixed inset-0 bg-emerald-950/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden border-4 border-emerald-600/10">
               <div className="bg-emerald-700 p-6 text-white relative">
-                <button onClick={() => setShowRecipeModal(null)} className="absolute top-4 right-4 bg-white/20 p-1.5 rounded-full hover:bg-white/30 transition-colors">
-                  <X className="w-4 h-4" />
-                </button>
+                <button onClick={() => setShowRecipeModal(null)} className="absolute top-4 right-4 bg-white/20 p-1.5 rounded-full"><X className="w-4 h-4" /></button>
                 <div className="flex items-center gap-3">
-                  <div className="bg-white/20 p-2 rounded-xl">
-                    <BookOpen className="w-6 h-6 text-white" />
-                  </div>
+                  <BookOpen className="w-6 h-6" />
                   <div>
                     <p className="text-[10px] uppercase font-bold tracking-[0.2em] text-emerald-200">สรุปวัตถุดิบที่ต้องใช้</p>
                     <h3 className="text-xl font-extrabold">{showRecipeModal.name}</h3>
                   </div>
                 </div>
               </div>
-              
               <div className="p-6">
-                {/* แสดงยอดผลิตรวมที่ใช้ในการคำนวณ */}
                 <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-2xl flex items-center justify-between">
-                  <span className="text-xs font-bold text-amber-800">ยอดผลิตที่ต้องเตรียมทั้งหมด:</span>
-                  <span className="bg-amber-500 text-white px-3 py-1 rounded-full font-black text-sm shadow-sm">
+                  <span className="text-xs font-bold text-amber-800">ยอดผลิตรวม:</span>
+                  <span className="bg-amber-500 text-white px-3 py-1 rounded-full font-black text-sm">
                     {productionMap[showRecipeModal.name] || 0} ชิ้น
                   </span>
                 </div>
-
                 <div className="space-y-3">
-                  {showRecipeModal.ingredients.length > 0 ? (
-                    showRecipeModal.ingredients.map((ing: any, i: number) => {
-                      const totalAmount = ing.amount * (productionMap[showRecipeModal.name] || 0);
-                      return (
-                        <div key={i} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
-                          <div className="flex flex-col">
-                            <span className="font-bold text-slate-700">{ing.name}</span>
-                            <span className="text-[10px] text-slate-400 font-medium">({ing.amount} {ing.unit} / ชิ้น)</span>
-                          </div>
-                          <span className="font-extrabold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-lg text-base">
-                            {totalAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {ing.unit}
-                          </span>
+                  {showRecipeModal.ingredients.map((ing: any, i: number) => {
+                    const totalAmount = ing.amount * (productionMap[showRecipeModal.name] || 0);
+                    return (
+                      <div key={i} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
+                        <div className="flex flex-col">
+                          <span className="font-bold text-slate-700 text-sm">{ing.name}</span>
+                          <span className="text-[10px] text-slate-400">({ing.amount} {ing.unit}/ชิ้น)</span>
                         </div>
-                      );
-                    })
-                  ) : (
-                    <p className="text-center py-4 text-slate-400 font-bold italic">ยังไม่ได้บันทึกส่วนผสมสำหรับขนมนี้</p>
-                  )}
+                        <span className="font-extrabold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-lg">
+                          {totalAmount.toLocaleString()} {ing.unit}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
-                
-                <p className="mt-4 text-[10px] text-slate-400 text-center font-medium italic">
-                  * คำนวณจากยอดออเดอร์ "รอดำเนินการ" ทั้งหมด
-                </p>
-
-                <button 
-                  onClick={() => setShowRecipeModal(null)}
-                  className="w-full mt-6 py-3 bg-emerald-700 text-white rounded-xl font-extrabold shadow-lg shadow-emerald-700/20 active:translate-y-0.5 transition-all"
-                >
-                  รับทราบ
-                </button>
+                <button onClick={() => setShowRecipeModal(null)} className="w-full mt-6 py-3 bg-emerald-700 text-white rounded-xl font-extrabold">รับทราบ</button>
               </div>
             </div>
           </div>
         )}
 
-        {/* Form Section */}
+        {/* Order Form */}
         {isAdding && (
-          <div className="bg-white rounded-[1.5rem] md:rounded-[2rem] shadow-2xl border border-emerald-100 p-4 md:p-6 mb-8 relative ring-4 ring-emerald-500/10 animate-in fade-in slide-in-from-top-4 duration-300">
-            <button onClick={() => { setIsAdding(false); resetForm(); }} className="absolute top-4 right-4 p-2 text-slate-400 hover:text-red-500 rounded-full transition-colors">
-              <X className="w-6 h-6" />
-            </button>
-
-            <h2 className="text-xl md:text-2xl font-extrabold mb-6 text-emerald-950 flex items-center gap-2 border-b-2 border-emerald-50 pb-4 pr-10">
-              <ShoppingCart className="text-emerald-600 w-5 h-5 md:w-6 md:h-6" /> 
+          <div className="bg-white rounded-[1.5rem] shadow-2xl border border-emerald-100 p-4 md:p-6 mb-8 relative ring-4 ring-emerald-500/10 animate-in fade-in slide-in-from-top-4">
+            <button onClick={() => { setIsAdding(false); resetForm(); }} className="absolute top-4 right-4 p-2 text-slate-400 hover:text-red-500"><X className="w-6 h-6" /></button>
+            <h2 className="text-xl md:text-2xl font-extrabold mb-6 text-emerald-950 flex items-center gap-2 border-b pb-4">
+              <ShoppingCart className="text-emerald-600 w-5 h-5" /> 
               {editingOrderId ? 'แก้ไขใบสั่งซื้อ' : 'สร้างใบสั่งซื้อใหม่'}
             </h2>
-            
-            <form onSubmit={handleCheckout} className="space-y-4 md:space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 bg-slate-50/50 p-3 rounded-2xl border border-slate-100">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-emerald-900 flex items-center gap-1"><User className="w-4 h-4 text-emerald-600" /> ชื่อลูกค้า</label>
-                  <input required type="text" value={customerName} onChange={(e) => setCustomerName(e.target.value)}
-                    className="w-full p-2.5 bg-white border-2 border-emerald-50 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none font-bold" placeholder="ระบุชื่อลูกค้า" />
+            <form onSubmit={handleCheckout} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-50/50 p-3 rounded-2xl">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-emerald-900 flex items-center gap-1"><User className="w-4 h-4" /> ชื่อลูกค้า</label>
+                  <input required type="text" value={customerName} onChange={(e) => setCustomerName(e.target.value)} className="w-full p-2.5 bg-white border-2 border-emerald-50 rounded-xl outline-none font-bold" />
                 </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-emerald-900 flex items-center gap-1"><Phone className="w-4 h-4 text-emerald-600" /> เบอร์โทรศัพท์</label>
-                  <input required type="tel" value={phone} onChange={(e) => setPhone(e.target.value)}
-                    className="w-full p-2.5 bg-white border-2 border-emerald-50 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none font-bold" placeholder="08X-XXX-XXXX" />
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-emerald-900 flex items-center gap-1"><Phone className="w-4 h-4" /> เบอร์โทรศัพท์</label>
+                  <input required type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} className="w-full p-2.5 bg-white border-2 border-emerald-50 rounded-xl outline-none font-bold" />
                 </div>
-                <div className="md:col-span-2 space-y-1.5">
-                  <label className="text-xs font-bold text-emerald-900 flex items-center gap-1"><MapPin className="w-4 h-4 text-emerald-600" /> ที่อยู่จัดส่ง</label>
-                  <input required type="text" value={address} onChange={(e) => setAddress(e.target.value)}
-                    className="w-full p-2.5 bg-white border-2 border-emerald-50 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none font-bold" placeholder="ระบุที่อยู่จัดส่งและเวลา..." />
+                <div className="md:col-span-2 space-y-1">
+                  <label className="text-xs font-bold text-emerald-900 flex items-center gap-1"><MapPin className="w-4 h-4" /> ที่อยู่จัดส่ง</label>
+                  <input required type="text" value={address} onChange={(e) => setAddress(e.target.value)} className="w-full p-2.5 bg-white border-2 border-emerald-50 rounded-xl outline-none font-bold" />
                 </div>
-                <div className="md:col-span-2 space-y-1.5">
-                  <label className="text-xs font-bold text-emerald-900 flex items-center gap-1"><CalendarDays className="w-4 h-4 text-emerald-600" /> วันที่จัดส่ง</label>
-                  <input required type="date" value={deliveryDate} onChange={(e) => setDeliveryDate(e.target.value)}
-                    className="w-full p-2.5 bg-white border-2 border-emerald-50 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none font-bold" />
+                <div className="md:col-span-2 space-y-1">
+                  <label className="text-xs font-bold text-emerald-900 flex items-center gap-1"><CalendarDays className="w-4 h-4" /> วันที่จัดส่ง</label>
+                  <input required type="date" value={deliveryDate} onChange={(e) => setDeliveryDate(e.target.value)} className="w-full p-2.5 bg-white border-2 border-emerald-50 rounded-xl outline-none font-bold" />
                 </div>
               </div>
 
-              {/* Selection Area */}
-              <div id="selection-area" className={`p-4 md:p-6 rounded-[1.5rem] border-2 transition-all space-y-6 ${editingCartId ? 'bg-amber-50 border-amber-200 ring-4 ring-amber-500/10' : 'bg-emerald-50/30 border-emerald-100'}`}>
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-emerald-50 pb-4">
-                  <label className="text-base md:text-lg font-bold text-emerald-900 flex items-center gap-2">
-                    {editingCartId && <Edit3 className="w-5 h-5 text-amber-500" />}
-                    {editingCartId ? 'กำลังแก้ไขรายการเซตที่เลือก' : '1. เลือกรูปแบบเซตเพื่อเพิ่มรายการ'}
-                  </label>
-                  <div className="flex items-center gap-3 w-full sm:w-auto">
-                    {editingCartId && (
-                      <button type="button" onClick={() => { setEditingCartId(null); setSelectedSetId(null); setSelectedItems([]); }}
-                        className="text-xs font-bold text-amber-700 underline underline-offset-4 ml-auto">ยกเลิกการแก้ไข</button>
-                    )}
-                  </div>
+              {/* Set Selection Area */}
+              <div id="selection-area" className={`p-4 rounded-[1.5rem] border-2 transition-all space-y-4 ${editingCartId ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50/30 border-emerald-100'}`}>
+                <div className="flex justify-between items-center border-b border-emerald-50 pb-2">
+                  <label className="text-sm font-bold text-emerald-900">1. เลือกรูปแบบเซต</label>
+                  {editingCartId && <button type="button" onClick={() => { setEditingCartId(null); setSelectedSetId(null); setSelectedItems([]); }} className="text-[10px] text-amber-700 underline font-bold">ยกเลิกแก้ไข</button>}
                 </div>
-
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {setConfigs.map((set) => (
-                    <button key={set.id} type="button" onClick={() => { setSelectedSetId(set.id); setSelectedItems([]); }}
-                      className={`p-3 rounded-xl border-2 text-xs md:text-sm font-extrabold transition-all text-center ${
-                        selectedSetId === set.id ? 'bg-emerald-600 border-emerald-700 text-white shadow-md' : 'bg-white border-emerald-50 text-emerald-900 hover:bg-emerald-50'
-                      }`}>
+                    <button key={set.id} type="button" onClick={() => { setSelectedSetId(set.id); setSelectedItems([]); }} className={`p-3 rounded-xl border-2 text-xs font-extrabold transition-all ${selectedSetId === set.id ? 'bg-emerald-600 border-emerald-700 text-white' : 'bg-white border-emerald-50 text-emerald-900'}`}>
                       {set.name}
-                      <div className={`text-[10px] mt-1 ${selectedSetId === set.id ? 'text-emerald-100' : 'text-emerald-500'}`}>฿{set.price} ({set.limit})</div>
+                      <div className="text-[10px] mt-1 opacity-80">฿{set.price}</div>
                     </button>
                   ))}
                 </div>
-
                 {selectedSet && (
-                  <div className="space-y-4 animate-in fade-in zoom-in-95">
-                    <div className="p-4 bg-white rounded-xl border border-emerald-100 shadow-sm space-y-3">
-                      <p className="font-bold text-sm text-emerald-900 flex justify-between">
-                        <span>เลือกขนมสำหรับ {selectedSet.name}</span>
-                        <span className={selectedItems.length === selectedSet.limit ? "text-emerald-600" : "text-amber-500"}>({selectedItems.length}/{selectedSet.limit})</span>
-                      </p>
+                  <div className="space-y-4 animate-in zoom-in-95">
+                    <div className="p-4 bg-white rounded-xl border border-emerald-100 shadow-sm">
+                      <p className="font-bold text-xs text-emerald-900 mb-2">เลือกขนม ({selectedItems.length}/{selectedSet.limit})</p>
                       <div className="flex flex-wrap gap-1.5">
                         {dessertList.map(item => (
-                          <button key={item} type="button" disabled={selectedItems.length >= selectedSet.limit && !selectedItems.includes(item)}
-                            onClick={() => handleItemToggle(item)}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all border-2 ${
-                              selectedItems.includes(item) ? 'bg-emerald-700 border-emerald-800 text-white shadow-sm' : 'bg-emerald-50 text-emerald-900 border-transparent'
-                            }`}>{item}</button>
+                          <button key={item} type="button" disabled={selectedItems.length >= selectedSet.limit && !selectedItems.includes(item)} onClick={() => handleItemToggle(item)} className={`px-3 py-1.5 rounded-lg text-xs font-bold border-2 ${selectedItems.includes(item) ? 'bg-emerald-700 border-emerald-800 text-white' : 'bg-emerald-50 text-emerald-900 border-transparent'}`}>{item}</button>
                         ))}
                       </div>
                     </div>
                     <div className="flex items-center gap-4">
                       <div className="flex-1">
-                        <label className="text-[10px] font-extrabold text-emerald-700 uppercase mb-1 block text-center">จำนวนกล่อง</label>
-                        <input type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)}
-                          className="w-full p-2.5 bg-white border border-emerald-100 rounded-xl text-center font-extrabold text-lg outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
+                        <label className="text-[9px] font-extrabold text-emerald-700 text-center block mb-1">จำนวนกล่อง</label>
+                        <input type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} className="w-full p-2.5 bg-white border border-emerald-100 rounded-xl text-center font-extrabold text-lg outline-none" />
                       </div>
-                      <button type="button" onClick={addToCart} disabled={selectedItems.length !== selectedSet.limit}
-                        className={`flex-[2] py-4 text-white rounded-xl font-extrabold text-sm shadow-lg disabled:opacity-30 transition-all ${editingCartId ? 'bg-amber-600 hover:bg-amber-700' : 'bg-amber-500 hover:bg-amber-600'}`}>
-                        {editingCartId ? 'ยืนยันการแก้ไขรายการ' : '+ เพิ่มเซตนี้ลงรายการ'}
+                      <button type="button" onClick={addToCart} disabled={selectedItems.length !== selectedSet.limit} className={`flex-[2] py-4 text-white rounded-xl font-extrabold text-sm shadow-lg ${editingCartId ? 'bg-amber-600' : 'bg-amber-500'}`}>
+                        {editingCartId ? 'ยืนยันแก้ไขรายการ' : '+ เพิ่มลงรายการ'}
                       </button>
                     </div>
                   </div>
                 )}
               </div>
 
+              {/* Order Summary */}
               <div className="space-y-3">
-                <h3 className="font-extrabold text-lg text-emerald-950 flex items-center gap-2"><ListChecks className="w-5 h-5 text-emerald-600" /> สรุปรายการในออเดอร์นี้</h3>
+                <h3 className="font-extrabold text-lg text-emerald-950 flex items-center gap-2"><ListChecks className="w-5 h-5" /> สรุปรายการ</h3>
                 {cart.length === 0 ? (
-                  <div className="p-8 border-2 border-dashed border-slate-200 rounded-2xl text-center text-slate-400 font-bold text-sm">ยังไม่มีรายการเซต</div>
+                  <div className="p-8 border-2 border-dashed border-slate-200 rounded-2xl text-center text-slate-400 text-sm font-bold">ยังไม่มีรายการ</div>
                 ) : (
                   <div className="space-y-2">
                     {cart.map((item) => (
-                      <div key={item.cartId} className={`flex items-center justify-between p-3 border rounded-xl shadow-sm transition-all ${editingCartId === item.cartId ? 'bg-amber-50 border-amber-300 ring-2 ring-amber-200' : 'bg-white border-emerald-50'}`}>
+                      <div key={item.cartId} className={`flex items-center justify-between p-3 border rounded-xl shadow-sm ${editingCartId === item.cartId ? 'bg-amber-50 border-amber-300' : 'bg-white'}`}>
                         <div className="flex-1">
                           <p className="font-bold text-emerald-900 text-sm">{item.setName} <span className="text-emerald-500">× {item.quantity}</span></p>
                           <p className="text-[10px] text-slate-500">{item.items.join(', ')}</p>
                         </div>
-                        <div className="flex items-center gap-2 ml-2">
-                          <p className="font-extrabold text-emerald-700 whitespace-nowrap">฿{item.totalPrice.toLocaleString()}</p>
-                          <div className="flex">
-                             <button type="button" onClick={() => startEditCartItem(item)} className="text-emerald-500 p-1.5 rounded-lg hover:bg-emerald-50"><Edit3 className="w-4 h-4"/></button>
-                             <button type="button" onClick={() => removeFromCart(item.cartId)} className="text-red-300 p-1.5 rounded-lg hover:bg-red-50"><Trash2 className="w-4 h-4"/></button>
-                          </div>
+                        <div className="flex items-center gap-2">
+                          <p className="font-extrabold text-emerald-700 text-sm">฿{item.totalPrice.toLocaleString()}</p>
+                          <button type="button" onClick={() => startEditCartItem(item)} className="text-emerald-500 p-1.5"><Edit3 className="w-4 h-4"/></button>
+                          <button type="button" onClick={() => removeFromCart(item.cartId)} className="text-red-300 p-1.5"><Trash2 className="w-4 h-4"/></button>
                         </div>
                       </div>
                     ))}
-                    <div className="p-5 bg-emerald-900 text-white rounded-2xl flex justify-between items-center shadow-xl mt-4">
-                      <div>
-                        <span className="font-bold uppercase tracking-widest text-emerald-300 text-[10px] block">ยอดเงินสุทธิ</span>
-                        <span className="text-2xl font-extrabold">฿{cartTotal.toLocaleString()}</span>
-                      </div>
+                    <div className="p-5 bg-emerald-900 text-white rounded-2xl flex justify-between items-center mt-4">
+                      <div><span className="text-[10px] block opacity-70">รวมทั้งสิ้น</span><span className="text-2xl font-extrabold">฿{cartTotal.toLocaleString()}</span></div>
                       <CheckCircle className="w-8 h-8 text-emerald-500" />
                     </div>
                   </div>
@@ -1032,10 +931,9 @@ const App = () => {
               </div>
 
               <div className="flex flex-col sm:flex-row gap-3 pt-4">
-                <button type="button" onClick={() => { setIsAdding(false); resetForm(); }} className="w-full sm:flex-1 py-4 bg-slate-100 text-slate-600 rounded-xl font-extrabold border-b-4 border-slate-300 active:translate-y-1 active:border-b-0 transition-all">ยกเลิก</button>
-                <button type="submit" disabled={cart.length === 0 || !customerName || !phone || editingCartId !== null}
-                  className="w-full sm:flex-[2] py-4 bg-emerald-700 text-white rounded-xl font-extrabold text-xl shadow-lg border-b-4 border-emerald-900 disabled:opacity-30 hover:bg-emerald-800 active:translate-y-1 active:border-b-0 transition-all">
-                  {editingOrderId ? 'บันทึกการแก้ไข' : 'ยืนยันบันทึกออเดอร์'}
+                <button type="button" onClick={() => { setIsAdding(false); resetForm(); }} className="w-full sm:flex-1 py-4 bg-slate-100 text-slate-600 rounded-xl font-extrabold">ยกเลิก</button>
+                <button type="submit" disabled={cart.length === 0 || !customerName || !phone || editingCartId !== null} className="w-full sm:flex-[2] py-4 bg-emerald-700 text-white rounded-xl font-extrabold text-xl shadow-lg hover:bg-emerald-800 disabled:opacity-30">
+                  {editingOrderId ? 'บันทึกแก้ไขออเดอร์' : 'ยืนยันบันทึกออเดอร์'}
                 </button>
               </div>
             </form>
@@ -1045,75 +943,44 @@ const App = () => {
         {/* Orders List */}
         <div className="space-y-5">
           <h2 className="text-2xl md:text-3xl font-extrabold text-emerald-950 flex items-center gap-2 border-b-2 border-emerald-200 pb-3">
-             <Calendar className="w-6 h-6 text-emerald-700" /> ออเดอร์วันนี้
+             <Calendar className="w-6 h-6 text-emerald-700" /> รายการสั่งซื้อ
           </h2>
           
           {isLoading ? (
-            <div className="bg-white p-12 rounded-[2rem] border-2 border-dashed border-emerald-100 text-center">
-              <p className="text-slate-400 font-bold italic">กำลังโหลดข้อมูล...</p>
-            </div>
+            <div className="bg-white p-12 rounded-[2rem] border-2 border-dashed text-center"><p className="text-slate-400 font-bold italic">กำลังโหลดข้อมูล...</p></div>
           ) : orders.length === 0 ? (
-            <div className="bg-white p-12 rounded-[2rem] border-2 border-dashed border-emerald-100 text-center">
-              <ShoppingBasket className="w-12 h-12 text-emerald-100 mx-auto mb-3" />
-              <p className="text-slate-400 font-bold italic">ยังไม่มีรายการสั่งซื้อ</p>
-            </div>
+            <div className="bg-white p-12 rounded-[2rem] border-2 border-dashed text-center"><p className="text-slate-400 font-bold italic">ยังไม่มีรายการสั่งซื้อ</p></div>
           ) : (
             <div className="grid grid-cols-1 gap-6">
-              {orders
-                .slice()
-                .sort((a, b) => {
-                  if (a.status === 'pending' && b.status !== 'pending') return -1;
-                  if (a.status !== 'pending' && b.status === 'pending') return 1;
-                  return b.timestamp.localeCompare(a.timestamp);
-                })
-                .map((order) => (
-                <div key={order.id} className={`rounded-2xl shadow-md border overflow-hidden transition-colors ${order.status === 'delivered' ? 'bg-emerald-50 border-emerald-200' : 'bg-[#FBF8E8] border-amber-200'}`}>
-                  {/* Card Header */}
+              {orders.map((order) => (
+                <div key={order.id} className={`rounded-2xl shadow-md border overflow-hidden ${order.status === 'delivered' ? 'bg-emerald-50 border-emerald-200' : 'bg-[#FBF8E8] border-amber-200'}`}>
                   <div className={`px-3 py-3 flex justify-between items-start gap-3 ${order.status === 'delivered' ? 'bg-emerald-100/60' : 'bg-[#F3EBCB]'}`}>
                       <div className="flex items-center gap-3">
-                          <div className="bg-emerald-700 text-white w-9 h-9 rounded-lg flex items-center justify-center font-bold text-base shrink-0">
-                              {order.customerName.charAt(0) || 'ก'}
-                          </div>
+                          <div className="bg-emerald-700 text-white w-9 h-9 rounded-lg flex items-center justify-center font-bold text-base shrink-0">{order.customerName.charAt(0)}</div>
                           <div>
                               <div className="flex flex-wrap items-center gap-x-2">
                                 <h3 className="font-bold text-base text-slate-800 leading-tight">{order.customerName}</h3>
-                                <a href={`tel:${order.phone}`} className="text-xs text-slate-500 font-bold flex items-center gap-0.5 hover:text-emerald-700 bg-white/40 px-1.5 py-0.5 rounded border border-slate-200/50 transition-colors" onClick={(e) => e.stopPropagation()}>
-                                    <Phone className="w-3 h-3" />
-                                    {order.phone}
+                                <a href={`tel:${order.phone}`} className="text-[10px] text-slate-500 font-bold flex items-center gap-0.5 bg-white/40 px-1.5 py-0.5 rounded border">
+                                    <Phone className="w-3 h-3" /> {order.phone}
                                 </a>
                               </div>
-                              <p className="text-xs text-slate-500 flex items-center gap-1 mt-1">
-                                  <Clock className="w-3 h-3" />
-                                  {new Date(order.timestamp).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
-                              </p>
+                              <p className="text-[10px] text-slate-500 flex items-center gap-1 mt-1"><Clock className="w-3 h-3" /> {new Date(order.timestamp).toLocaleTimeString('th-TH')}</p>
                           </div>
                       </div>
-                      <div className="text-right shrink-0">
-                          {order.status === 'pending' ? (
-                              <div className="bg-amber-400 text-amber-900 text-[10px] font-bold px-2 py-0.5 rounded-full inline-block mb-1">
-                                  กำลังดำเนินการ
-                              </div>
-                          ) : (
-                              <div className="bg-emerald-400 text-emerald-900 text-[10px] font-bold px-2 py-0.5 rounded-full inline-block mb-1">
-                                  จัดส่งแล้ว
-                              </div>
-                          )}
-                          <p className="text-lg font-black text-slate-800 leading-tight">฿{order.grandTotal.toLocaleString()}</p>
+                      <div className="text-right">
+                          <div className={`text-[9px] font-bold px-2 py-0.5 rounded-full inline-block mb-1 ${order.status === 'delivered' ? 'bg-emerald-400' : 'bg-amber-400'}`}>
+                              {order.status === 'delivered' ? 'จัดส่งแล้ว' : 'กำลังดำเนินการ'}
+                          </div>
+                          <p className="text-lg font-black text-slate-800">฿{order.grandTotal.toLocaleString()}</p>
                       </div>
                   </div>
 
-                  {/* Card Body */}
                   <div className="p-3 space-y-3">
-                      {/* Info pills */}
-                      <div className="bg-white/60 p-2.5 rounded-lg flex flex-col sm:flex-row justify-between items-start sm:items-center text-sm gap-2 border border-slate-100">
-                          <div className="flex items-center gap-2 text-slate-600 font-semibold truncate w-full">
-                              <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                              <span className="truncate">{order.address || 'N/A'}</span>
-                          </div>
+                      <div className="bg-white/60 p-2.5 rounded-lg flex items-center gap-2 text-xs font-semibold text-slate-600 border border-slate-100">
+                          <MapPin className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">{order.address} | วันที่ส่ง: {order.deliveryDate}</span>
                       </div>
-
-                      {/* Items summary */}
-                      <div className={`p-3 rounded-lg text-sm font-semibold text-slate-700 leading-relaxed space-y-1.5 ${order.status === 'delivered' ? 'bg-emerald-100/40' : 'bg-amber-100/50'}`}>
+                      <div className={`p-3 rounded-lg text-sm font-semibold text-slate-700 space-y-1.5 ${order.status === 'delivered' ? 'bg-emerald-100/40' : 'bg-amber-100/50'}`}>
                           {order.orderItems && order.orderItems.length > 0
                               ? order.orderItems.map((item: any, idx: number) => (
                                   <div key={idx} className="flex items-start gap-2">
@@ -1121,33 +988,17 @@ const App = () => {
                                     <span>{item.setName} ({item.items.join(', ')}) x {item.quantity}</span>
                                   </div>
                                 ))
-                              : order.itemsSummary.split(' | ').map((line: string, idx: number) => (
-                                  <div key={idx} className="flex items-start gap-2">
-                                    {line.trim() && <span className="min-w-[5px] h-[5px] rounded-full bg-slate-400 mt-2 shrink-0" />}
-                                    <span>{line.trim()}</span>
-                                  </div>
-                                ))
+                              : <p>{order.itemsSummary}</p>
                           }
                       </div>
-
-                      {/* Actions */}
                       <div className="flex justify-between items-center pt-1">
-                          <button
-                              onClick={() => toggleOrderStatus(order.id)}
-                              disabled={order.status === 'delivered'}
-                              className={`font-bold text-sm flex items-center gap-2 transition-all px-4 py-2 rounded-full ${order.status === 'delivered' 
-                                  ? 'bg-emerald-600 text-white opacity-70 cursor-not-allowed' 
-                                  : 'bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95'}`}>
+                          <button onClick={() => toggleOrderStatus(order.id)} disabled={order.status === 'delivered'} className={`font-bold text-xs flex items-center gap-2 px-4 py-2 rounded-full ${order.status === 'delivered' ? 'bg-emerald-600 text-white opacity-70' : 'bg-emerald-600 text-white'}`}>
                               <CheckCircle className="w-4 h-4"/>
                               <span>{order.status === 'delivered' ? 'เรียบร้อย' : 'จัดส่ง'}</span>
                           </button>
                           <div className="flex items-center gap-1.5">
-                              <button onClick={() => startEditOrder(order)} className="flex items-center gap-1.5 text-slate-500 hover:text-slate-800 text-xs font-bold transition-colors px-2.5 py-1.5 rounded-md hover:bg-slate-100">
-                                  <Edit className="w-3.5 h-3.5"/> แก้ไข
-                              </button>
-                              <button onClick={() => deleteOrder(order.id)} className="text-slate-400 hover:text-red-500 p-2 transition-colors rounded-md hover:bg-red-50">
-                                  <Trash2 className="w-4 h-4"/>
-                              </button>
+                              <button onClick={() => startEditOrder(order)} className="text-slate-500 hover:text-slate-800 text-xs font-bold px-2.5 py-1.5">แก้ไข</button>
+                              <button onClick={() => deleteOrder(order.id)} className="text-slate-400 hover:text-red-500 p-2"><Trash2 className="w-4 h-4"/></button>
                           </div>
                       </div>
                   </div>
@@ -1157,12 +1008,6 @@ const App = () => {
           )}
         </div>
       </div>
-      
-      <style>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #064e3b; border-radius: 10px; }
-      `}</style>
     </div>
   );
 };
